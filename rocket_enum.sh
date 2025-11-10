@@ -374,6 +374,9 @@ subenum() {
     ##################################
     echo "[*] Starting Active Enumeration..."
 
+    # Ensure active directory exists for background jobs
+    mkdir -p "$output_dir/active"
+
     # High-speed DNS bruteforce with puredns
     if command -v puredns >/dev/null 2>&1 && [ -f "$WORDLIST_PATH" ] && [ -f "$RESOLVERS_PATH" ]; then
         echo "[*] Running puredns bruteforce..."
