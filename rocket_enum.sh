@@ -559,6 +559,9 @@ subenum() {
     echo "| Duration: ${duration}s"
     echo "|"
     echo "| Results:"
+
+    mkdir -p "$output_dir/final"
+    
     local total_found
     total_found=$(wc -l < "$output_dir/all_subdomains_${domain}.txt" 2>/dev/null || echo "0")
     local resolved_count
