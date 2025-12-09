@@ -16,6 +16,13 @@ export URLSCAN_API_KEY="your_urlscan_api_key_here"
 export SHODAN_API_KEY="your_shodan_api_key_here"
 export CENSYS_API_ID="your_censys_api_id_here"
 export CENSYS_API_SECRET="your_censys_api_secret_here"
+# --- NEW CONFIGURATION (ADD TO TOP) ---
+export FACEBOOK_APP_ID="your_facebook_app_id_here"
+export FACEBOOK_APP_SECRET="your_facebook_app_secret_here"
+export TIMEOUT_SSL_ENUM="300s" 
+
+# Check dependencies (Update your existing check_dependencies function with this list)
+# local required_tools=("subfinder" "assetfinder" "dnsx" "curl" "jq" "gau" "dig" "subdominator" "bbot")
 
 # Configuration paths - update these to match your system
 export SUBFINDER_CONFIG_PATH="/root/.config/subfinder/provider-config.yaml"
@@ -39,10 +46,11 @@ export SUBFINDER_TIMEOUT_FLAG="20"       # For subfinder -timeout flag (just the
 
 
 # Function to check if required tools are installed
+# Updated check_dependencies function
 check_dependencies() {
     local missing_tools=()
-    # --- NEW: Added 'gau' and 'dnsx' to required list ---
-    local required_tools=("subfinder" "assetfinder" "dnsx" "curl" "jq" "gau")
+    # Added 'dig' because reverse_dns_enumeration relies on it
+    local required_tools=("subfinder" "assetfinder" "dnsx" "curl" "jq" "gau" "dig")
     
     for tool in "${required_tools[@]}"; do
         if ! command -v "$tool" >/dev/null 2>&1; then
@@ -55,7 +63,6 @@ check_dependencies() {
         echo "[!] Please install missing tools before running the script"
         return 1
     fi
-    
     return 0
 }
 
@@ -79,10 +86,136 @@ safe_mkdir() {
     return 0
 }
 
+run_subdominator() {
+    local domain="$1"
+    local output_dir="$2"
+    if command -v subdominator >/dev/null 2>&1; then
+        echo "[*] === RUNNING SUBDOMINATOR ==="
+        timeout "$TIMEOUT_PASSIVE_TOOLS" subdominator -d "$domain" \
+            $([ -f "$SUBDOMINATOR_CONFIG_PATH" ] && echo "-c $SUBDOMINATOR_CONFIG_PATH") \
+            -o "$output_dir/passive/subdominator_${domain}.txt" 2>/dev/null || true
+    fi
+}
+
+run_bbot() {
+    local domain="$1"
+    local output_dir="$2"
+    if command -v bbot >/dev/null 2>&1; then
+        echo "[*] === RUNNING BBOT (Active) ==="
+        safe_mkdir "$output_dir/active/bbot_temp"
+        timeout "$TIMEOUT_ACTIVE_TOOLS" bbot -t "$domain" -f subdomain-enum -m asn httpx \
+            -o "$output_dir/active/bbot_temp" --silent --yes 2>/dev/null || true
+        
+        if [ -f "$output_dir/active/bbot_temp/output.txt" ]; then
+            grep -E "[a-zA-Z0-9.-]+\.${domain}$" "$output_dir/active/bbot_temp/output.txt" \
+                | sort -u > "$output_dir/active/bbot_${domain}.txt"
+        fi
+        rm -rf "$output_dir/active/bbot_temp"
+    fi
+}
+
+ssl_cert_enumeration() {
+    local domain="$1"
+    local output_dir="$2"
+    echo "[*] === SSL CERTIFICATE MINING ==="
+    safe_mkdir "$output_dir/passive/ssl_certs"
+    # Wildcard and Identity search in parallel
+    timeout "$TIMEOUT_SSL_ENUM" curl -sk "https://crt.sh/?q=%.${domain}&output=json" 2>/dev/null \
+        | jq -r '.[].name_value // empty' 2>/dev/null | sed 's/\*\.//g' | grep -v "^$" \
+        | sort -u > "$output_dir/passive/ssl_certs/crtsh_wildcard.txt" &
+    timeout "$TIMEOUT_SSL_ENUM" curl -sk "https://crt.sh/?Identity=${domain}&output=json" 2>/dev/null \
+        | jq -r '.[].name_value // empty' 2>/dev/null | sed 's/\*\.//g' | grep -v "^$" \
+        | sort -u > "$output_dir/passive/ssl_certs/crtsh_identity.txt" &
+    wait
+    cat "$output_dir/passive/ssl_certs"/*.txt 2>/dev/null | sort -u > "$output_dir/passive/ssl_certs_${domain}.txt"
+}
+
+cloud_recon() {
+    local domain="$1"
+    local output_dir="$2"
+    echo "[*] === CLOUD RECONNAISSANCE ==="
+    safe_mkdir "$output_dir/active/cloud"
+    timeout "$TIMEOUT_API" curl -sk "http://ec2-reachability.amazonaws.com/" -H "Host: ${domain}" 2>/dev/null \
+        | grep -oE "[a-zA-Z0-9.-]+\.${domain}" | sort -u > "$output_dir/active/cloud/ec2_reach.txt" &
+    if [ -f "$RESOLVERS_PATH" ]; then
+        echo "$domain" | timeout "$TIMEOUT_RESOLUTION" dnsx -silent -r "$RESOLVERS_PATH" -resp -cname \
+            | grep -iE "(amazonaws|azurewebsites|cloudfront|googleusercontent|cloudflare|akamai)" \
+            > "$output_dir/active/cloud/cloud_cname.txt" 2>&1 &
+    fi
+    wait
+    cat "$output_dir/active/cloud"/*.txt 2>/dev/null | grep -E "[a-zA-Z0-9.-]+" | sort -u > "$output_dir/active/cloud_recon_${domain}.txt"
+}
+
+reverse_dns_enumeration() {
+    local domain="$1"
+    local output_dir="$2"
+    echo "[*] === REVERSE DNS ==="
+    safe_mkdir "$output_dir/active/rdns"
+    timeout "$TIMEOUT_API" curl -sk "https://dnsdumpster.com/" -H "Referer: https://dnsdumpster.com/" \
+        -d "targetip=${domain}" 2>/dev/null | grep -oE "[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}" \
+        | sort -u > "$output_dir/active/rdns/dnsdumpster.txt" &
+    if [ -f "$RESOLVERS_PATH" ]; then
+        dig +short A "$domain" 2>/dev/null | timeout "$TIMEOUT_RESOLUTION" dnsx -silent -ptr -resp-only -r "$RESOLVERS_PATH" \
+            | grep -E "[a-zA-Z0-9.-]+" > "$output_dir/active/rdns/ptr_records.txt" 2>&1 &
+    fi
+    wait
+    cat "$output_dir/active/rdns"/*.txt 2>/dev/null | sort -u > "$output_dir/active/rdns_${domain}.txt"
+}
+
+advanced_scraping() {
+    local domain="$1"
+    local output_dir="$2"
+    
+    echo "[*] === ADVANCED MULTI-SOURCE SCRAPING ==="
+    safe_mkdir "$output_dir/passive/scraping"
+    
+    # Infrastructure Sources
+    timeout "$TIMEOUT_API" curl -sk "https://freeapi.robtex.com/pdns/forward/${domain}" 2>/dev/null \
+        | jq -r '.rrname // empty' 2>/dev/null | grep "\.${domain}$" \
+        | sort -u > "$output_dir/passive/scraping/robtex.txt" &
+    
+    timeout "$TIMEOUT_API" curl -sk "https://api.hackertarget.com/hostsearch/?q=${domain}" 2>/dev/null \
+        | cut -d',' -f1 | grep "\.${domain}$" \
+        | sort -u > "$output_dir/passive/scraping/hackertarget.txt" &
+    
+    timeout "$TIMEOUT_API" curl -sk "https://www.threatcrowd.org/searchApi/v2/domain/report/?domain=${domain}" 2>/dev/null \
+        | jq -r '.subdomains[]? // empty' 2>/dev/null \
+        | sed "s/$/.$domain/" | sort -u > "$output_dir/passive/scraping/threatcrowd.txt" &
+    
+    # Search Engine Scraping (Note: High chance of Captcha/Block without proxies)
+    timeout "$TIMEOUT_API" curl -sk "https://www.google.com/search?q=site:*.${domain}&num=100" \
+        -H "User-Agent: Mozilla/5.0" 2>/dev/null \
+        | grep -oE "[a-zA-Z0-9.-]+\.${domain}" \
+        | sort -u > "$output_dir/passive/scraping/google.txt" &
+    
+    timeout "$TIMEOUT_API" curl -sk "https://www.bing.com/search?q=site:*.${domain}&count=50" \
+        -H "User-Agent: Mozilla/5.0" 2>/dev/null \
+        | grep -oE "[a-zA-Z0-9.-]+\.${domain}" \
+        | sort -u > "$output_dir/passive/scraping/bing.txt" &
+    
+    # Facebook CT
+    if [ -n "$FACEBOOK_APP_ID" ] && [ -n "$FACEBOOK_APP_SECRET" ] && [[ ! "$FACEBOOK_APP_ID" == "your_"* ]]; then
+        local fb_token="${FACEBOOK_APP_ID}|${FACEBOOK_APP_SECRET}"
+        timeout "$TIMEOUT_API" curl -sk \
+            "https://graph.facebook.com/certificates?query=*.${domain}&access_token=${fb_token}" 2>/dev/null \
+            | jq -r '.data[]?.domains[]? // empty' 2>/dev/null \
+            | grep "\.${domain}$" | sort -u > "$output_dir/passive/scraping/facebook_ct.txt" &
+    fi
+    
+    wait
+    
+    cat "$output_dir/passive/scraping"/*.txt 2>/dev/null | grep -E "[a-zA-Z0-9.-]+" | sort -u > "$output_dir/passive/advanced_scraping_${domain}.txt"
+    echo "[+] Multi-Source Scraping: $(wc -l < "$output_dir/passive/advanced_scraping_${domain}.txt" 2>/dev/null || echo 0) results"
+}
+
 subenum() {
     local domain="$1"
     local threads="${2:-100}"
     local output_dir="${3}"
+
+    # -------------------------------------------------------------------------
+    # 1. INITIALIZATION & VALIDATION
+    # -------------------------------------------------------------------------
 
     # Input validation
     if [ -z "$domain" ] || [ -z "$output_dir" ]; then
@@ -101,19 +234,17 @@ subenum() {
         return 1
     fi
     
-    # --- FIX: Resource Exhaustion Check ---
+    # Resource Exhaustion Check
     local max_procs
     max_procs=$(nproc 2>/dev/null || echo 4) # Default to 4 if nproc fails
     if [ "$threads" -gt $((max_procs * 50)) ]; then
         echo "[!] WARNING: Thread count ($threads) is very high for $max_procs cores."
         echo "[!] This may cause system instability or get you rate-limited."
-        read -p "Continue anyway? (y/N): " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            return 1
-        fi
+        # Commented out read for automation, enable if you want manual confirmation
+        # read -p "Continue anyway? (y/N): " -n 1 -r
+        # echo
+        # if [[ ! $REPLY =~ ^[Yy]$ ]]; then return 1; fi
     fi
-    # --- END FIX ---
     
     # Check dependencies
     if ! check_dependencies; then
@@ -125,11 +256,7 @@ subenum() {
         echo "[!] WARNING: Resolvers file not found: $RESOLVERS_PATH"
         echo "[!] Resolution will be limited. Download from:"
         echo "    https://github.com/trickest/resolvers"
-        read -p "Continue anyway? (y/N): " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            return 1
-        fi
+        # Automatic continue for automation
     fi
 
     # Checkpoint handling
@@ -137,21 +264,31 @@ subenum() {
     local resume_from_stage=""
     
     if [ -f "$checkpoint_file" ]; then
-        echo "[*] Previous scan detected. Resume? (y/N)"
-        read -r response
-        if [[ "$response" =~ ^[Yy]$ ]]; then
+        # Check if we are in bulk mode (silent resume) or manual mode
+        if [[ "$output_dir" == *"bulk_"* ]]; then
             source "$checkpoint_file" 2>/dev/null || true
             resume_from_stage="$LAST_COMPLETED_STAGE"
-            echo "[*] Resuming from checkpoint: $resume_from_stage"
+            echo "[*] Auto-resuming from checkpoint: $resume_from_stage"
+        else
+            echo "[*] Previous scan detected. Resume? (y/N)"
+            read -r response
+            if [[ "$response" =~ ^[Yy]$ ]]; then
+                source "$checkpoint_file" 2>/dev/null || true
+                resume_from_stage="$LAST_COMPLETED_STAGE"
+                echo "[*] Resuming from checkpoint: $resume_from_stage"
+            fi
         fi
     fi
     
-    # --- FIX: Checkpoint Waterfall Logic ---
+    # --- WATERFALL LOGIC (UPDATED WITH NEW STAGES) ---
     local run_stage_passive_nonapi=true
+    local run_stage_advanced_passive=true  # NEW: Subdominator & Scraping
+    local run_stage_ssl_enum=true          # NEW: SSL Mining
     local run_stage_passive_api=true
-    # --- NEW: Added dns_records stage ---
     local run_stage_dns_records=true
+    local run_stage_active_recon=true      # NEW: Cloud & RDNS
     local run_stage_active_enum=true
+    local run_stage_bbot=true              # NEW: BBOT
     local run_stage_permutation=true
     local run_stage_ct_logs=true
 
@@ -160,45 +297,85 @@ subenum() {
             "passive_nonapi")
                 run_stage_passive_nonapi=false
                 ;;
+            "advanced_passive")
+                run_stage_passive_nonapi=false
+                run_stage_advanced_passive=false
+                ;;
+            "ssl_enum")
+                run_stage_passive_nonapi=false
+                run_stage_advanced_passive=false
+                run_stage_ssl_enum=false
+                ;;
             "passive_api")
                 run_stage_passive_nonapi=false
+                run_stage_advanced_passive=false
+                run_stage_ssl_enum=false
                 run_stage_passive_api=false
                 ;;
-            # --- NEW: Added dns_records to waterfall ---
             "dns_records")
                 run_stage_passive_nonapi=false
+                run_stage_advanced_passive=false
+                run_stage_ssl_enum=false
                 run_stage_passive_api=false
                 run_stage_dns_records=false
+                ;;
+            "active_recon")
+                run_stage_passive_nonapi=false
+                run_stage_advanced_passive=false
+                run_stage_ssl_enum=false
+                run_stage_passive_api=false
+                run_stage_dns_records=false
+                run_stage_active_recon=false
                 ;;
             "active_enum")
                 run_stage_passive_nonapi=false
+                run_stage_advanced_passive=false
+                run_stage_ssl_enum=false
                 run_stage_passive_api=false
                 run_stage_dns_records=false
+                run_stage_active_recon=false
                 run_stage_active_enum=false
+                ;;
+            "bbot_stage")
+                run_stage_passive_nonapi=false
+                run_stage_advanced_passive=false
+                run_stage_ssl_enum=false
+                run_stage_passive_api=false
+                run_stage_dns_records=false
+                run_stage_active_recon=false
+                run_stage_active_enum=false
+                run_stage_bbot=false
                 ;;
             "permutation")
                 run_stage_passive_nonapi=false
+                run_stage_advanced_passive=false
+                run_stage_ssl_enum=false
                 run_stage_passive_api=false
                 run_stage_dns_records=false
+                run_stage_active_recon=false
                 run_stage_active_enum=false
+                run_stage_bbot=false
                 run_stage_permutation=false
                 ;;
             "ct_logs")
                 run_stage_passive_nonapi=false
+                run_stage_advanced_passive=false
+                run_stage_ssl_enum=false
                 run_stage_passive_api=false
                 run_stage_dns_records=false
+                run_stage_active_recon=false
                 run_stage_active_enum=false
+                run_stage_bbot=false
                 run_stage_permutation=false
                 run_stage_ct_logs=false
                 ;;
         esac
     fi
-    # --- END FIX ---
 
     echo "[*] Running Advanced Subdomain Enumeration for $domain"
     echo "[*] Using $threads threads for concurrent operations"
 
-    # Setup directories
+    # Setup directories (Ensure all needed subdirs exist)
     if ! safe_mkdir "$output_dir"/{passive,active,resolved,final}; then
         return 1
     fi
@@ -209,34 +386,24 @@ subenum() {
         return 1
     fi
     
-        # --- Better Exit Trap ---
-    # Function to clean up child processes and temp files
+    # Trap to clean up child processes and temp files
     cleanup() {
         local main_pid=$$
-        echo
-        echo "[!] Interrupted (PID $main_pid). Cleaning up..."
-    
-        # Kill all child processes of this script
-        # pkill -P $main_pid
-    
-        # A more compatible way to kill all processes in the group
-        kill 0
+        # A compatible way to kill all processes in the group
+        kill 0 2>/dev/null
     }
-    
-    # Set the trap to call the cleanup function *only once*
     trap 'trap - INT TERM EXIT; cleanup' INT TERM EXIT
-    # --- End Trap ---
     
     local start_time
     start_time=$(date +%s)
 
-    ##################################
-    # NON-API PASSIVE ENUMERATION (PARALLEL)
-    ##################################
+    # -------------------------------------------------------------------------
+    # 2. NON-API PASSIVE ENUMERATION
+    # -------------------------------------------------------------------------
     if [[ "$run_stage_passive_nonapi" == true ]]; then
         echo "[*] Starting Non-API Passive Enumeration (Parallel)..."
 
-        # Function for parallel non-API passive enumeration
+        # Define the worker function internally to keep scope clean
         run_nonapi_passive_enum() {
             local source="$1"
             local domain="$2"
@@ -287,7 +454,6 @@ subenum() {
                             || echo "[!] Chaos failed" >&2
                     fi
                     ;;
-                # --- NEW: Replaced weak curl with 'gau' ---
                 "gau")
                     if command -v gau >/dev/null 2>&1; then
                         echo "[*] Running gau (Web Archives)..."
@@ -308,10 +474,7 @@ subenum() {
             esac
         }
 
-        # Export function for subshells
         export -f run_nonapi_passive_enum
-
-        # --- NEW: Added 'gau' to sources list ---
         local nonapi_sources=("subfinder" "assetfinder" "amass" "findomain" "chaos" "gau" "crtsh")
         
         for source in "${nonapi_sources[@]}"; do
@@ -326,13 +489,36 @@ subenum() {
         echo "LAST_COMPLETED_STAGE='passive_nonapi'" > "$checkpoint_file"
     fi
 
-    ##################################
-    # API-BASED SOURCES (SEQUENTIAL WITH DELAYS)
-    ##################################
+    # -------------------------------------------------------------------------
+    # 3. NEW: ADVANCED PASSIVE (Subdominator & Scraping)
+    # -------------------------------------------------------------------------
+    if [[ "$run_stage_advanced_passive" == true ]]; then
+        echo "[*] Starting Advanced Passive Modules..."
+        
+        # Run these in background parallel to save time
+        run_subdominator "$domain" "$output_dir" &
+        advanced_scraping "$domain" "$output_dir" &
+        
+        wait
+        echo "LAST_COMPLETED_STAGE='advanced_passive'" > "$checkpoint_file"
+    fi
+
+    # -------------------------------------------------------------------------
+    # 4. NEW: SSL CERTIFICATE ENUMERATION
+    # -------------------------------------------------------------------------
+    if [[ "$run_stage_ssl_enum" == true ]]; then
+        # This function spawns its own background jobs, so we call it directly
+        ssl_cert_enumeration "$domain" "$output_dir"
+        
+        echo "LAST_COMPLETED_STAGE='ssl_enum'" > "$checkpoint_file"
+    fi
+
+    # -------------------------------------------------------------------------
+    # 5. API-BASED SOURCES (SEQUENTIAL)
+    # -------------------------------------------------------------------------
     if [[ "$run_stage_passive_api" == true ]]; then
         echo "[*] Starting API-based enumeration (Sequential with rate limiting)..."
 
-        # Function for API-based enumeration with error handling
         run_api_enum() {
             local api_name="$1"
             local domain="$2"
@@ -344,26 +530,9 @@ subenum() {
                         echo "[*] Running VirusTotal API..."
                         if vt_resp=$(timeout "$TIMEOUT_API" curl -s -H "x-apikey: $VIRUSTOTAL_API_KEY" \
                             "https://www.virustotal.com/ui/domains/${domain}/subdomains?limit=40" 2>/dev/null); then
-                            if [ -n "$vt_resp" ] && echo "$vt_resp" | jq empty >/dev/null 2>&1; then
-                                echo "$vt_resp" | jq -r '.data[]?.id // empty' 2>/dev/null \
-                                    | grep -E "^[a-zA-Z0-9.-]+\.${domain}$" \
-                                    | grep -v "^null$" | grep -v "^$" \
-                                    > "$output_dir/passive/virustotal_${domain}.txt" \
-                                    || echo "[!] VirusTotal jq processing failed" >&2
-                                local count
-                                count=$(wc -l < "$output_dir/passive/virustotal_${domain}.txt" 2>/dev/null || echo "0")
-                                echo "[+] VirusTotal: $count results"
-                            else
-                                echo "[!] VirusTotal: Invalid JSON response"
-                                touch "$output_dir/passive/virustotal_${domain}.txt"
-                            fi
-                        else
-                            echo "[!] VirusTotal: API request failed"
-                            touch "$output_dir/passive/virustotal_${domain}.txt"
+                            echo "$vt_resp" | jq -r '.data[]?.id // empty' 2>/dev/null \
+                                | grep -E "\.${domain}$" > "$output_dir/passive/virustotal_${domain}.txt"
                         fi
-                    else
-                        echo "[!] VirusTotal: API key not configured"
-                        touch "$output_dir/passive/virustotal_${domain}.txt"
                     fi
                     ;;
                 "securitytrails")
@@ -371,194 +540,62 @@ subenum() {
                         echo "[*] Running SecurityTrails API..."
                         if st_resp=$(timeout "$TIMEOUT_API" curl -s -H "APIKEY: $SECURITYTRAILS_API_KEY" \
                             "https://api.securitytrails.com/v1/domain/${domain}/subdomains" 2>/dev/null); then
-                            if [ -n "$st_resp" ] && echo "$st_resp" | jq empty >/dev/null 2>&1; then
-                                echo "$st_resp" | jq -r '.subdomains[]? // empty' 2>/dev/null \
-                                    | sed "s/$/.$domain/" \
-                                    | grep -E "^[a-zA-Z0-9.-]+\.${domain}$" \
-                                    > "$output_dir/passive/securitytrails_${domain}.txt" \
-                                    || echo "[!] SecurityTrails jq processing failed" >&2
-                                local count
-                                count=$(wc -l < "$output_dir/passive/securitytrails_${domain}.txt" 2>/dev/null || echo "0")
-                                echo "[+] SecurityTrails: $count results"
-                            else
-                                echo "[!] SecurityTrails: Invalid JSON response"
-                                touch "$output_dir/passive/securitytrails_${domain}.txt"
-                            fi
-                        else
-                            echo "[!] SecurityTrails: API request failed"
-                            touch "$output_dir/passive/securitytrails_${domain}.txt"
+                            echo "$st_resp" | jq -r '.subdomains[]? // empty' 2>/dev/null \
+                                | sed "s/$/.$domain/" > "$output_dir/passive/securitytrails_${domain}.txt"
                         fi
-
-                        # SecurityTrails History API
-                        echo "[*] Running SecurityTrails History API..."
-                        if st_history=$(timeout "$TIMEOUT_API" curl -s -H "APIKEY: $SECURITYTRAILS_API_KEY" \
-                            "https://api.securitytrails.com/v1/history/${domain}/dns/a" 2>/dev/null); then
-                            if [ -n "$st_history" ] && echo "$st_history" | jq empty >/dev/null 2>&1; then
-                                echo "$st_history" | jq -r '.records[].values[].ip // empty' 2>/dev/null \
-                                    | sort -u > "$output_dir/passive/securitytrails_history_${domain}.txt" \
-                                    || echo "[!] SecurityTrails History processing failed" >&2
-                            fi
-                        fi
-                    else
-                        echo "[!] SecurityTrails: API key not configured"
-                        touch "$output_dir/passive/securitytrails_${domain}.txt"
                     fi
                     ;;
                 "shodan")
                     if [ -n "$SHODAN_API_KEY" ] && [[ ! "$SHODAN_API_KEY" == "your_"* ]]; then
                         echo "[*] Running Shodan API..."
-                        
-                        if shodan_resp=$(timeout "$TIMEOUT_API" curl -s \
-                            "https://api.shodan.io/dns/domain/${domain}?key=${SHODAN_API_KEY}" 2>/dev/null); then
-                            
-                            if [ -n "$shodan_resp" ] && echo "$shodan_resp" | jq empty >/dev/null 2>&1; then
-                                if echo "$shodan_resp" | jq -e '.error' >/dev/null 2>&1; then
-                                    local error_msg
-                                    error_msg=$(echo "$shodan_resp" | jq -r '.error')
-                                    echo "[!] Shodan API error: $error_msg"
-                                    touch "$output_dir/passive/shodan_${domain}.txt"
-                                else
-                                    echo "$shodan_resp" | jq -r '.data[]? // empty' 2>/dev/null \
-                                        | while read -r subdomain; do
-                                            if [ -n "$subdomain" ] && [ "$subdomain" != "null" ]; then
-                                                echo "${subdomain}.${domain}"
-                                            fi
-                                        done | grep -E "^[a-zA-Z0-9.-]+\.${domain}$" \
-                                        | sort -u > "$output_dir/passive/shodan_${domain}.txt" \
-                                        || echo "[!] Shodan processing failed" >&2
-                                    
-                                    local count
-                                    count=$(wc -l < "$output_dir/passive/shodan_${domain}.txt" 2>/dev/null || echo "0")
-                                    echo "[+] Shodan: $count results"
-                                fi
-                            else
-                                echo "[!] Shodan: Invalid or empty response"
-                                touch "$output_dir/passive/shodan_${domain}.txt"
-                            fi
-                        else
-                            echo "[!] Shodan: API request failed or timed out"
-                            touch "$output_dir/passive/shodan_${domain}.txt"
-                        fi
-                    else
-                        echo "[!] Shodan: API key not configured"
-                        touch "$output_dir/passive/shodan_${domain}.txt"
+                        timeout "$TIMEOUT_API" curl -s "https://api.shodan.io/dns/domain/${domain}?key=${SHODAN_API_KEY}" 2>/dev/null \
+                            | jq -r '.data[]? // empty' 2>/dev/null | sed "s/$/.$domain/" \
+                            | grep -E "\.${domain}$" > "$output_dir/passive/shodan_${domain}.txt"
                     fi
                     ;;
                 "github")
                     if [ -n "$GITHUB_TOKEN" ] && [[ ! "$GITHUB_TOKEN" == "your_"* ]]; then
                         echo "[*] Running GitHub API..."
-                        if gh_resp=$(timeout "$TIMEOUT_API" curl -s -H "Authorization: token $GITHUB_TOKEN" \
-                            "https://api.github.com/search/code?q=${domain}+extension:json+OR+extension:txt+OR+extension:xml" 2>/dev/null); then
-                            if [ -n "$gh_resp" ] && echo "$gh_resp" | jq empty >/dev/null 2>&1; then
-                                echo "$gh_resp" | jq -r '.items[]?.name // empty' 2>/dev/null \
-                                    | grep -oE "[a-zA-Z0-9.-]+\.${domain}" 2>/dev/null \
-                                    | sort -u > "$output_dir/passive/github_${domain}.txt" \
-                                    || echo "[!] GitHub processing failed" >&2
-                                local count
-                                count=$(wc -l < "$output_dir/passive/github_${domain}.txt" 2>/dev/null || echo "0")
-                                echo "[+] GitHub: $count results"
-                            else
-                                echo "[!] GitHub: Invalid JSON response"
-                                touch "$output_dir/passive/github_${domain}.txt"
-                            fi
-                        else
-                            echo "[!] GitHub: API request failed"
-                            touch "$output_dir/passive/github_${domain}.txt"
-                        fi
-                    else
-                        echo "[!] GitHub: Token not configured"
-                        touch "$output_dir/passive/github_${domain}.txt"
+                        timeout "$TIMEOUT_API" curl -s -H "Authorization: token $GITHUB_TOKEN" \
+                            "https://api.github.com/search/code?q=${domain}+extension:json+OR+extension:txt" 2>/dev/null \
+                            | jq -r '.items[]?.name // empty' 2>/dev/null | grep -oE "[a-zA-Z0-9.-]+\.${domain}" \
+                            > "$output_dir/passive/github_${domain}.txt"
                     fi
                     ;;
                 "urlscan")
                     if [ -n "$URLSCAN_API_KEY" ] && [[ ! "$URLSCAN_API_KEY" == "your_"* ]]; then
                         echo "[*] Running URLScan API..."
-                        if us_resp=$(timeout "$TIMEOUT_API" curl -s -H "API-Key: $URLSCAN_API_KEY" \
-                            "https://urlscan.io/api/v1/search/?q=domain:${domain}" 2>/dev/null); then
-                            if [ -n "$us_resp" ] && echo "$us_resp" | jq empty >/dev/null 2>&1; then
-                                echo "$us_resp" | jq -r '.results[]?.page?.domain // empty' 2>/dev/null \
-                                    | grep -E "^[a-zA-Z0-9.-]+\.${domain}$" \
-                                    | sort -u > "$output_dir/passive/urlscan_${domain}.txt" \
-                                    || echo "[!] URLScan processing failed" >&2
-                                local count
-                                count=$(wc -l < "$output_dir/passive/urlscan_${domain}.txt" 2>/dev/null || echo "0")
-                                echo "[+] URLScan: $count results"
-                            else
-                                echo "[!] URLScan: Invalid JSON response"
-                                touch "$output_dir/passive/urlscan_${domain}.txt"
-                            fi
-                        else
-                            echo "[!] URLScan: API request failed"
-                            touch "$output_dir/passive/urlscan_${domain}.txt"
-                        fi
-                    else
-                        echo "[!] URLScan: API key not configured"
-                        touch "$output_dir/passive/urlscan_${domain}.txt"
+                        timeout "$TIMEOUT_API" curl -s -H "API-Key: $URLSCAN_API_KEY" \
+                            "https://urlscan.io/api/v1/search/?q=domain:${domain}" 2>/dev/null \
+                            | jq -r '.results[]?.page?.domain // empty' 2>/dev/null | grep -E "\.${domain}$" \
+                            > "$output_dir/passive/urlscan_${domain}.txt"
                     fi
                     ;;
                 "censys")
                     if [ -n "$CENSYS_API_ID" ] && [ -n "$CENSYS_API_SECRET" ] && [[ ! "$CENSYS_API_ID" == "your_"* ]]; then
                         echo "[*] Running Censys API..."
-                        if censys_resp=$(timeout "$TIMEOUT_API" curl -s -u "$CENSYS_API_ID:$CENSYS_API_SECRET" \
-                            "https://search.censys.io/api/v2/hosts/search?q=services.service_name:HTTP+and+names:*.${domain}" 2>/dev/null); then
-                            if [ -n "$censys_resp" ] && echo "$censys_resp" | jq empty >/dev/null 2>&1; then
-                                echo "$censys_resp" | jq -r '.result.hits[].names[]? // empty' 2>/dev/null \
-                                    | grep -E "^[a-zA-Z0-9.-]+\.${domain}$" \
-                                    | sort -u > "$output_dir/passive/censys_${domain}.txt" \
-                                    || echo "[!] Censys processing failed" >&2
-                                local count
-                                count=$(wc -l < "$output_dir/passive/censys_${domain}.txt" 2>/dev/null || echo "0")
-                                echo "[+] Censys: $count results"
-                            else
-                                echo "[!] Censys: Invalid JSON response"
-                                touch "$output_dir/passive/censys_${domain}.txt"
-                            fi
-                        else
-                            echo "[!] Censys: API request failed"
-                            touch "$output_dir/passive/censys_${domain}.txt"
-                        fi
-                    else
-                        echo "[!] Censys: API credentials not configured"
-                        touch "$output_dir/passive/censys_${domain}.txt"
+                        timeout "$TIMEOUT_API" curl -s -u "$CENSYS_API_ID:$CENSYS_API_SECRET" \
+                            "https://search.censys.io/api/v2/hosts/search?q=services.service_name:HTTP+and+names:*.${domain}" 2>/dev/null \
+                            | jq -r '.result.hits[].names[]? // empty' 2>/dev/null | grep -E "\.${domain}$" \
+                            > "$output_dir/passive/censys_${domain}.txt"
                     fi
                     ;;
-                # --- NEW: Added AlienVault OTX ---
                 "alienvault")
                     if [ -n "$ALIENVAULT_API_KEY" ] && [[ ! "$ALIENVAULT_API_KEY" == "your_"* ]]; then
-                        echo "[*] Running AlienVault OTX API..."
-                        if av_resp=$(timeout "$TIMEOUT_API" curl -s -H "X-OTX-API-KEY: $ALIENVAULT_API_KEY" \
-                            "https://otx.alienvault.com/api/v1/indicators/domain/${domain}/passive_dns" 2>/dev/null); then
-                            if [ -n "$av_resp" ] && echo "$av_resp" | jq empty >/dev/null 2>&1; then
-                                echo "$av_resp" | jq -r '.passive_dns[]?.hostname // empty' 2>/dev/null \
-                                    | grep -E "^[a-zA-Z0-9.-]+\.${domain}$" \
-                                    | sort -u > "$output_dir/passive/alienvault_${domain}.txt" \
-                                    || echo "[!] AlienVault processing failed" >&2
-                                local count
-                                count=$(wc -l < "$output_dir/passive/alienvault_${domain}.txt" 2>/dev/null || echo "0")
-                                echo "[+] AlienVault: $count results"
-                            else
-                                echo "[!] AlienVault: Invalid JSON response"
-                                touch "$output_dir/passive/alienvault_${domain}.txt"
-                            fi
-                        else
-                            echo "[!] AlienVault: API request failed"
-                            touch "$output_dir/passive/alienvault_${domain}.txt"
-                        fi
-                    else
-                        echo "[!] AlienVault: API key not configured"
-                        touch "$output_dir/passive/alienvault_${domain}.txt"
+                        echo "[*] Running AlienVault API..."
+                        timeout "$TIMEOUT_API" curl -s -H "X-OTX-API-KEY: $ALIENVAULT_API_KEY" \
+                            "https://otx.alienvault.com/api/v1/indicators/domain/${domain}/passive_dns" 2>/dev/null \
+                            | jq -r '.passive_dns[]?.hostname // empty' 2>/dev/null | grep -E "\.${domain}$" \
+                            > "$output_dir/passive/alienvault_${domain}.txt"
                     fi
                     ;;
             esac
         }
 
-        # --- NEW: Added 'alienvault' to API list ---
         local api_sources=("virustotal" "securitytrails" "shodan" "github" "urlscan" "censys" "alienvault")
         
         for api_source in "${api_sources[@]}"; do
-            if ! run_api_enum "$api_source" "$domain" "$output_dir"; then
-                echo "[!] Skipped $api_source due to error"
-            fi
+            run_api_enum "$api_source" "$domain" "$output_dir"
             echo "[*] Waiting 1 second before next API call..."
             sleep 1
         done
@@ -567,10 +604,12 @@ subenum() {
         echo "LAST_COMPLETED_STAGE='passive_api'" > "$checkpoint_file"
     fi
 
-    ##################################
-    # MERGE PASSIVE RESULTS
-    ##################################
+    # -------------------------------------------------------------------------
+    # 6. MERGE PASSIVE RESULTS
+    # -------------------------------------------------------------------------
     echo "[*] Merging passive results..."
+    # Matches all files ending in _${domain}.txt in the passive folder
+    # This picks up subfinder_, subdominator_, advanced_scraping_, etc.
     find "$output_dir/passive" -name "*_${domain}.txt" -type f -exec cat {} + 2>/dev/null \
         | grep -E "^[a-zA-Z0-9.-]+\.${domain}$" \
         | sort -u > "$output_dir/passive_all_${domain}.txt" \
@@ -580,10 +619,9 @@ subenum() {
     passive_count=$(wc -l < "$output_dir/passive_all_${domain}.txt" 2>/dev/null || echo "0")
     echo "[+] Passive enumeration found: $passive_count subdomains"
 
-    # --- NEW: DNS Record Mining Stage ---
-    ##################################
-    # DNS RECORD MINING (MX, TXT, SRV)
-    ##################################
+    # -------------------------------------------------------------------------
+    # 7. DNS RECORD MINING
+    # -------------------------------------------------------------------------
     if [[ "$run_stage_dns_records" == true ]]; then
         echo "[*] Starting DNS Record Mining (MX, TXT, SRV)..."
         if [ -f "$RESOLVERS_PATH" ]; then
@@ -601,18 +639,32 @@ subenum() {
         # Save checkpoint
         echo "LAST_COMPLETED_STAGE='dns_records'" > "$checkpoint_file"
     fi
-    # --- END NEW STAGE ---
 
-    ##################################
-    # ACTIVE ENUMERATION & BRUTEFORCE
-    ##################################
-    if [[ "$run_stage_active_enum" == true ]]; then
-        echo "[*] Starting Active Enumeration..."
-
+    # -------------------------------------------------------------------------
+    # 8. NEW: ACTIVE RECON (CLOUD & REVERSE DNS)
+    # -------------------------------------------------------------------------
+    if [[ "$run_stage_active_recon" == true ]]; then
+        echo "[*] Starting Active Reconnaissance Modules..."
+        
         # Ensure active directory exists
         mkdir -p "$output_dir/active"
+        
+        # Run Cloud Recon and Reverse DNS in parallel
+        cloud_recon "$domain" "$output_dir" &
+        reverse_dns_enumeration "$domain" "$output_dir" &
+        
+        wait
+        echo "LAST_COMPLETED_STAGE='active_recon'" > "$checkpoint_file"
+    fi
 
-        # --- NEW: Zone Transfer (AXFR) Check ---
+    # -------------------------------------------------------------------------
+    # 9. ACTIVE ENUMERATION & BRUTEFORCE
+    # -------------------------------------------------------------------------
+    if [[ "$run_stage_active_enum" == true ]]; then
+        echo "[*] Starting Active Enumeration..."
+        mkdir -p "$output_dir/active"
+
+        # Zone Transfer (AXFR) Check
         if [ -f "$RESOLVERS_PATH" ]; then
             echo "[*] Running DNS Zone Transfer (AXFR) check..."
             {
@@ -622,22 +674,14 @@ subenum() {
                 if [ -n "$ns_servers" ]; then
                     for ns in $ns_servers; do
                         echo "[*] Trying AXFR against $ns..."
-                        # Use dnsx to attempt the transfer
                         timeout "$TIMEOUT_API" dnsx -d "$domain" -axfr -s "$ns" -silent -r "$RESOLVERS_PATH" 2>/dev/null \
-                            | grep -E "^[a-zA-Z0-9.-]+\.${domain}$" \
                             >> "$output_dir/active/axfr_${domain}.txt"
                     done
                     sort -u -o "$output_dir/active/axfr_${domain}.txt" "$output_dir/active/axfr_${domain}.txt" \
                         || echo "[!] AXFR sort failed" >&2
-                    local axfr_count
-                    axfr_count=$(wc -l < "$output_dir/active/axfr_${domain}.txt" 2>/dev/null || echo "0")
-                    echo "[+] Zone Transfer check found: $axfr_count subdomains"
-                else
-                    echo "[!] Could not find NS servers for $domain, skipping AXFR."
                 fi
-            } & # Run AXFR checks in the background
+            } & 
         fi
-        # --- END NEW CHECK ---
 
         # High-speed DNS bruteforce with puredns
         if command -v puredns >/dev/null 2>&1 && [ -f "$WORDLIST_PATH" ] && [ -f "$RESOLVERS_PATH" ]; then
@@ -648,9 +692,9 @@ subenum() {
                 || echo "[!] puredns bruteforce failed" >&2
         fi
 
-        # Fast DNS resolution with massdns
+        # Fast DNS resolution with massdns (Secondary check)
         if command -v massdns >/dev/null 2>&1 && [ -f "$WORDLIST_PATH" ] && [ -f "$RESOLVERS_PATH" ]; then
-            echo "[*] Running massdns bruteforce..."
+            echo "[*] Running massdns bruteforce (Top 100k)..."
             {
                 head -100000 "$WORDLIST_PATH" | sed "s/$/.$domain/" \
                     | timeout "$TIMEOUT_ACTIVE_TOOLS" massdns -r "$RESOLVERS_PATH" -t A -o S -w "$tmp_dir/massdns_raw.txt" 2>/dev/null \
@@ -672,21 +716,30 @@ subenum() {
         fi
 
         wait
-        
-        # Save checkpoint
         echo "LAST_COMPLETED_STAGE='active_enum'" > "$checkpoint_file"
     fi
 
-    ##################################
-    # PERMUTATION & MUTATION
-    ##################################
+    # -------------------------------------------------------------------------
+    # 10. NEW: BBOT ENUMERATION (Active & Heavy)
+    # -------------------------------------------------------------------------
+    if [[ "$run_stage_bbot" == true ]]; then
+        # BBOT is heavy and resource intensive, run sequentially
+        # Note: run_bbot saves to output_dir/active/bbot_${domain}.txt
+        run_bbot "$domain" "$output_dir"
+        
+        echo "LAST_COMPLETED_STAGE='bbot_stage'" > "$checkpoint_file"
+    fi
+
+    # -------------------------------------------------------------------------
+    # 11. PERMUTATION & MUTATION
+    # -------------------------------------------------------------------------
     if [[ "$run_stage_permutation" == true ]]; then
         echo "[*] Starting Permutation & Mutation..."
 
-        # --- LOGIC FIX: Create a combined seed list ---
+        # Create combined seed list from everything found so far
         echo "[*] Creating combined seed list for permutations..."
         local base_domains="$tmp_dir/all_seeds_for_permutation.txt"
-        find "$output_dir" -path "*/passive_all_${domain}.txt" -o -path "*/active/*_${domain}.txt" -type f -exec cat {} + 2>/dev/null \
+        find "$output_dir" -name "*_${domain}.txt" -type f -exec cat {} + 2>/dev/null \
             | grep -E "^[a-zA-Z0-9.-]+\.${domain}$" \
             | sort -u > "$base_domains" \
             || echo "[!] Failed to create combined seed list" >&2
@@ -694,13 +747,11 @@ subenum() {
         local seed_count
         seed_count=$(wc -l < "$base_domains" 2>/dev/null || echo "0")
         echo "[+] Using $seed_count combined subdomains as seeds for permutation"
-        # --- END LOGIC FIX ---
 
         # Alterx for fast permutations
         if command -v alterx >/dev/null 2>&1 && [ -s "$base_domains" ] && [ -f "$RESOLVERS_PATH" ]; then
             echo "[*] Running alterx permutations..."
             {
-                # --- FIX: Use head on the combined list ---
                 head -5000 "$base_domains" | \
                 timeout "$TIMEOUT_PIPELINES" alterx -l - -silent -enrich -limit 50000 \
                     | timeout "$TIMEOUT_PIPELINES" dnsx -silent -r "$RESOLVERS_PATH" -t "$threads" \
@@ -713,7 +764,6 @@ subenum() {
         if command -v dnsgen >/dev/null 2>&1 && [ -s "$base_domains" ] && [ -f "$RESOLVERS_PATH" ]; then
             echo "[*] Running dnsgen permutations..."
             {
-                # --- FIX: Use head on the combined list ---
                 head -2000 "$base_domains" | timeout "$TIMEOUT_PIPELINES" dnsgen - | head -100000 \
                     | timeout "$TIMEOUT_PIPELINES" dnsx -silent -r "$RESOLVERS_PATH" -t "$threads" \
                     -o "$output_dir/active/dnsgen_${domain}.txt" 2>/dev/null \
@@ -722,42 +772,29 @@ subenum() {
         fi
 
         wait
-        
-        # Save checkpoint
         echo "LAST_COMPLETED_STAGE='permutation'" > "$checkpoint_file"
     fi
 
-    ##################################
-    # CERTIFICATE TRANSPARENCY MINING
-    ##################################
+    # -------------------------------------------------------------------------
+    # 12. CERTIFICATE TRANSPARENCY MINING (FALLBACK)
+    # -------------------------------------------------------------------------
     if [[ "$run_stage_ct_logs" == true ]]; then
-        echo "[*] Advanced Certificate Transparency Mining..."
-
-        # Multiple CT log sources
-        local ct_sources=(
-            "https://crt.sh/?q=%.${domain}&output=json"
-        )
-
-        for ct_url in "${ct_sources[@]}"; do
-            {
-                timeout "$TIMEOUT_API" curl -sk "$ct_url" 2>/dev/null \
-                    | jq -r '.[].name_value // empty' 2>/dev/null \
-                    | grep -E "^[a-zA-Z0-9.-]+\.${domain}$" \
-                    | sed 's/\*\.//g' \
-                    | sort -u >> "$output_dir/active/ct_multiple_${domain}.txt" \
-                    || echo "[!] CT log retrieval failed for $ct_url" >&2
-            } &
-        done
-
-        wait
+        echo "[*] Checking CT Logs (Fallback)..."
+        # We already did advanced SSL mining, but we'll do a quick check here as a fallback
+        local ct_url="https://crt.sh/?q=%.${domain}&output=json"
+        timeout "$TIMEOUT_API" curl -sk "$ct_url" 2>/dev/null \
+            | jq -r '.[].name_value // empty' 2>/dev/null \
+            | grep -E "^[a-zA-Z0-9.-]+\.${domain}$" \
+            | sed 's/\*\.//g' \
+            | sort -u > "$output_dir/active/ct_fallback_${domain}.txt" &
         
-        # Save checkpoint
+        wait
         echo "LAST_COMPLETED_STAGE='ct_logs'" > "$checkpoint_file"
     fi
 
-    ##################################
-    # MERGE ALL RESULTS
-    ##################################
+    # -------------------------------------------------------------------------
+    # 13. MERGE ALL RESULTS
+    # -------------------------------------------------------------------------
     echo "[*] Merging all enumeration results..."
     
     find "$output_dir" -name "*_${domain}.txt" -type f -exec cat {} + 2>/dev/null \
@@ -766,9 +803,9 @@ subenum() {
         | sort -u > "$output_dir/all_subdomains_${domain}.txt" \
         || echo "[!] Failed to merge all results" >&2
 
-    ##################################
-    # FAST RESOLUTION & VALIDATION
-    ##################################
+    # -------------------------------------------------------------------------
+    # 14. FAST RESOLUTION & VALIDATION
+    # -------------------------------------------------------------------------
     echo "[*] Fast resolution and validation..."
 
     # Ensure resolved directory exists
@@ -798,16 +835,16 @@ subenum() {
         | sort -u > "$output_dir/final/${domain}_final_resolved.txt" \
         || echo "[!] Failed to create final resolved list" >&2
 
-    ##################################
-    # ADVANCED INFORMATION GATHERING
-    ##################################
-    echo "[*] Advanced information gathering..."
+    # -------------------------------------------------------------------------
+    # 15. ADVANCED INFORMATION GATHERING
+    # -------------------------------------------------------------------------
+    echo "[*] Advanced information gathering (IPs & CNAMEs)..."
 
     local resolved_file="$output_dir/final/${domain}_final_resolved.txt"
 
     if [ -s "$resolved_file" ]; then
-        # Get A records and IPs
         if [ -f "$RESOLVERS_PATH" ]; then
+            # Get A records and IPs
             timeout "$TIMEOUT_RESOLUTION" dnsx -l "$resolved_file" -silent -a -resp-only \
                 -r "$RESOLVERS_PATH" -t "$threads" \
                 | sort -u > "$output_dir/final/${domain}_ips.txt" 2>/dev/null \
@@ -819,14 +856,12 @@ subenum() {
                 | sort -u > "$output_dir/final/${domain}_cnames.txt" 2>/dev/null \
                 || echo "[!] dnsx CNAME record scan failed" >&2 &
         fi
-
-
         wait
     fi
 
-    ##################################
-    # CLEANUP & SUMMARY
-    ##################################
+    # -------------------------------------------------------------------------
+    # 16. CLEANUP & SUMMARY
+    # -------------------------------------------------------------------------
     local end_time
     end_time=$(date +%s)
     local duration=$((end_time - start_time))
@@ -853,14 +888,6 @@ subenum() {
     echo "| • Total subdomains found: $total_found"
     echo "| • Resolved subdomains: $resolved_count"
     echo "| • Unique IP addresses: $ip_count"
-    
-    # --- NOTE: This file is no longer created, but check is harmless ---
-    if [ -f "$output_dir/final/${domain}_open_ports.txt" ]; then
-        local port_count
-        port_count=$(wc -l < "$output_dir/final/${domain}_open_ports.txt" 2>/dev/null || echo "0")
-        echo "| • Open ports found: $port_count"
-    fi
-    
     echo "|"
     echo "| Output directory: $output_dir"
     echo "+-------------------------------------------------------------------+"
@@ -870,7 +897,7 @@ subenum() {
     rm -rf "$tmp_dir"
     rm -f "$checkpoint_file"
     
-    # --- FIX: Updated summary template ---
+    # Save Summary
     cat > "$output_dir/SUMMARY_${domain}.txt" << EOF
 Subdomain Enumeration Summary for $domain
 ==========================================
@@ -889,7 +916,6 @@ Key Files:
 - IP addresses: final/${domain}_ips.txt
 - CNAME records: final/${domain}_cnames.txt
 EOF
-    # --- END FIX ---
 
     echo "[+] Summary saved to: $output_dir/SUMMARY_${domain}.txt"
     return 0
