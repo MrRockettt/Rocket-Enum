@@ -97,22 +97,34 @@ run_subdominator() {
     fi
 }
 
+# NEW: BBOT (actually produces a domain list)
 run_bbot() {
     local domain="$1"
     local output_dir="$2"
-    if command -v bbot >/dev/null 2>&1; then
-        echo "[*] === RUNNING BBOT (Active) ==="
-        safe_mkdir "$output_dir/active/bbot_temp"
-        timeout "$TIMEOUT_ACTIVE_TOOLS" bbot -t "$domain" -f subdomain-enum -m asn httpx \
-            -o "$output_dir/active/bbot_temp" --silent --yes 2>/dev/null || true
-        
-        if [ -f "$output_dir/active/bbot_temp/output.txt" ]; then
-            grep -E "[a-zA-Z0-9.-]+\.${domain}$" "$output_dir/active/bbot_temp/output.txt" \
-                | sort -u > "$output_dir/active/bbot_${domain}.txt"
-        fi
-        rm -rf "$output_dir/active/bbot_temp"
+
+    if ! command -v bbot >/dev/null 2>&1; then
+        echo "[!] bbot not found, skipping BBOT enumeration."
+        return
+    fi
+
+    echo "[*] Running BBOT for $domain..."
+    mkdir -p "$output_dir/active"
+
+    # Use a simple domains output format
+    timeout "$TIMEOUT_ACTIVE_TOOLS" bbot -t "$domain" \
+        -f subdomain-enum \
+        -om domains \
+        -o "$output_dir/active/bbot_temp" \
+        --silent --yes 2>/dev/null || true
+
+    if [ -f "$output_dir/active/bbot_temp/domains.txt" ]; then
+        grep -E "^[a-zA-Z0-9.-]+\.${domain}$" "$output_dir/active/bbot_temp/domains.txt" \
+            | sort -u > "$output_dir/active/bbot_${domain}.txt"
+    else
+        : > "$output_dir/active/bbot_${domain}.txt"
     fi
 }
+
 
 ssl_cert_enumeration() {
     local domain="$1"
@@ -178,9 +190,12 @@ advanced_scraping() {
         | cut -d',' -f1 | grep "\.${domain}$" \
         | sort -u > "$output_dir/passive/scraping/hackertarget.txt" &
     
+    # NEW: ThreatCrowd scraping (fixed)
     timeout "$TIMEOUT_API" curl -sk "https://www.threatcrowd.org/searchApi/v2/domain/report/?domain=${domain}" 2>/dev/null \
         | jq -r '.subdomains[]? // empty' 2>/dev/null \
-        | sed "s/$/.$domain/" | sort -u > "$output_dir/passive/scraping/threatcrowd.txt" &
+        | grep -E "\.${domain}$" \
+        | sort -u > "$output_dir/passive/scraping/threatcrowd.txt" &
+
     
     # Search Engine Scraping (Note: High chance of Captcha/Block without proxies)
     timeout "$TIMEOUT_API" curl -sk "https://www.google.com/search?q=site:*.${domain}&num=100" \
@@ -463,14 +478,6 @@ subenum() {
                             || echo "[!] gau failed" >&2
                     fi
                     ;;
-                "crtsh")
-                    echo "[*] Running crt.sh..."
-                    timeout "$TIMEOUT_API" curl -sk "https://crt.sh/?q=%.${domain}&output=json" 2>/dev/null \
-                        | jq -r '.[].name_value // empty' 2>/dev/null \
-                        | sed 's/\*\.//g' | grep -E "^[a-zA-Z0-9.-]+\.${domain}$" \
-                        | sort -u > "$output_dir/passive/crtsh_${domain}.txt" 2>/dev/null \
-                        || echo "[!] crt.sh failed" >&2
-                    ;;
             esac
         }
 
@@ -545,14 +552,21 @@ subenum() {
                         fi
                     fi
                     ;;
+                # NEW: Shodan parsing (fixed)
                 "shodan")
-                    if [ -n "$SHODAN_API_KEY" ] && [[ ! "$SHODAN_API_KEY" == "your_"* ]]; then
-                        echo "[*] Running Shodan API..."
-                        timeout "$TIMEOUT_API" curl -s "https://api.shodan.io/dns/domain/${domain}?key=${SHODAN_API_KEY}" 2>/dev/null \
-                            | jq -r '.data[]? // empty' 2>/dev/null | sed "s/$/.$domain/" \
-                            | grep -E "\.${domain}$" > "$output_dir/passive/shodan_${domain}.txt"
+                    if [ -n "$SHODAN_API_KEY" ]; then
+                        echo "[*] Running Shodan..."
+                        timeout "$TIMEOUT_API" curl -sk \
+                            "https://api.shodan.io/dns/domain/${domain}?key=${SHODAN_API_KEY}" 2>/dev/null \
+                            | jq -r '.data[]?.subdomain // empty' 2>/dev/null \
+                            | sed "s/$/.$domain/" \
+                            | grep -E "^[a-zA-Z0-9.-]+\.${domain}$" \
+                            | sort -u > "$output_dir/passive/shodan_${domain}.txt"
+                    else
+                        : > "$output_dir/passive/shodan_${domain}.txt"
                     fi
                     ;;
+                
                 "github")
                     if [ -n "$GITHUB_TOKEN" ] && [[ ! "$GITHUB_TOKEN" == "your_"* ]]; then
                         echo "[*] Running GitHub API..."
@@ -775,22 +789,22 @@ subenum() {
         echo "LAST_COMPLETED_STAGE='permutation'" > "$checkpoint_file"
     fi
 
-    # -------------------------------------------------------------------------
-    # 12. CERTIFICATE TRANSPARENCY MINING (FALLBACK)
-    # -------------------------------------------------------------------------
-    if [[ "$run_stage_ct_logs" == true ]]; then
-        echo "[*] Checking CT Logs (Fallback)..."
-        # We already did advanced SSL mining, but we'll do a quick check here as a fallback
-        local ct_url="https://crt.sh/?q=%.${domain}&output=json"
-        timeout "$TIMEOUT_API" curl -sk "$ct_url" 2>/dev/null \
-            | jq -r '.[].name_value // empty' 2>/dev/null \
-            | grep -E "^[a-zA-Z0-9.-]+\.${domain}$" \
-            | sed 's/\*\.//g' \
-            | sort -u > "$output_dir/active/ct_fallback_${domain}.txt" &
+    # # -------------------------------------------------------------------------
+    # # 12. CERTIFICATE TRANSPARENCY MINING (FALLBACK)
+    # # -------------------------------------------------------------------------
+    # if [[ "$run_stage_ct_logs" == true ]]; then
+    #     echo "[*] Checking CT Logs (Fallback)..."
+    #     # We already did advanced SSL mining, but we'll do a quick check here as a fallback
+    #     local ct_url="https://crt.sh/?q=%.${domain}&output=json"
+    #     timeout "$TIMEOUT_API" curl -sk "$ct_url" 2>/dev/null \
+    #         | jq -r '.[].name_value // empty' 2>/dev/null \
+    #         | grep -E "^[a-zA-Z0-9.-]+\.${domain}$" \
+    #         | sed 's/\*\.//g' \
+    #         | sort -u > "$output_dir/active/ct_fallback_${domain}.txt" &
         
-        wait
-        echo "LAST_COMPLETED_STAGE='ct_logs'" > "$checkpoint_file"
-    fi
+    #     wait
+    #     echo "LAST_COMPLETED_STAGE='ct_logs'" > "$checkpoint_file"
+    # fi
 
     # -------------------------------------------------------------------------
     # 13. MERGE ALL RESULTS
