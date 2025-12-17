@@ -714,38 +714,41 @@ subenum() {
     # -------------------------------------------------------------------------
     # 9. ACTIVE ENUMERATION & BRUTEFORCE
     # -------------------------------------------------------------------------
-    # Zone Transfer (AXFR) Check using dnsx
-if [ -f "$RESOLVERS_PATH" ]; then
-    echo "[*] Running DNS Zone Transfer (AXFR) check..."
+    if [[ "$run_stage_active_enum" == true ]]; then
+        echo "[*] Starting Active Enumeration & Bruteforce..."
 
-    mkdir -p "$output_dir/active"
-    local axfr_file="$output_dir/active/axfr_${domain}.txt"
-    : > "$axfr_file"
+        # Ensure active directory exists
+        mkdir -p "$output_dir/active"
 
-    # Get NS servers for the domain (via dig - reliable)
-    local ns_servers
-    ns_servers=$(dig +short NS "$domain" 2>/dev/null | sed 's/\.$//' | sort -u)
+        # Zone Transfer (AXFR) Check using dnsx
+        if [ -f "$RESOLVERS_PATH" ]; then
+            echo "[*] Running DNS Zone Transfer (AXFR) check..."
 
-    if [ -n "$ns_servers" ]; then
-        echo "$ns_servers" | while IFS= read -r ns; do
-            [ -z "$ns" ] && continue
+            local axfr_file="$output_dir/active/axfr_${domain}.txt"
+            : > "$axfr_file"
 
-            echo "[*] Trying AXFR with dnsx against $ns..."
+            # Get NS servers for the domain (via dig - reliable)
+            local ns_servers
+            ns_servers=$(dig +short NS "$domain" 2>/dev/null | sed 's/\.$//' | sort -u)
 
-            # dnsx AXFR صحیح format → "domain@nameserver"
-            echo "${domain}@${ns}" | \
-                timeout "$TIMEOUT_API" dnsx -axfr -silent 2>/dev/null \
-                >> "$axfr_file"
+            if [ -n "$ns_servers" ]; then
+                echo "$ns_servers" | while IFS= read -r ns; do
+                    [ -z "$ns" ] && continue
 
-        done
-    fi
+                    echo "[*] Trying AXFR with dnsx against $ns..."
 
-    if [ -s "$axfr_file" ]; then
-        sort -u -o "$axfr_file" "$axfr_file"
-    fi
-fi
+                    # dnsx AXFR correct format → "domain@nameserver"
+                    echo "${domain}@${ns}" | \
+                        timeout "$TIMEOUT_API" dnsx -axfr -silent 2>/dev/null \
+                        >> "$axfr_file"
 
+                done
+            fi
 
+            if [ -s "$axfr_file" ]; then
+                sort -u -o "$axfr_file" "$axfr_file"
+            fi
+        fi
 
         # High-speed DNS bruteforce with puredns
         if command -v puredns >/dev/null 2>&1 && [ -f "$WORDLIST_PATH" ] && [ -f "$RESOLVERS_PATH" ]; then
