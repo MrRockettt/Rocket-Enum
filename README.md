@@ -1,61 +1,55 @@
-EnumerX 🚀
+# EnumerX 🚀
 
-EnumerX is a comprehensive, modular, and "fail-fast" subdomain enumeration wrapper designed for offensive security professionals and bug bounty hunters.
+![Bash](https://img.shields.io/badge/Language-Bash-4EAA25?style=flat-square&logo=gnu-bash&logoColor=white)
+![Security](https://img.shields.io/badge/Category-Reconnaissance-red?style=flat-square)
+![Maintenance](https://img.shields.io/badge/Maintained-Yes-blue?style=flat-square)
 
-Unlike simple wrappers that blindly pipe tools into each other, EnumerX uses a Waterfall Logic with intermediate validation steps. It aggregates passive data, validates it, and only then performs expensive active reconnaissance (permutations/bruteforce) on the verified dataset. This saves time, reduces CPU load, and eliminates "garbage-in-garbage-out" results.
-🔥 Key Features
+**EnumerX** is a comprehensive, modular, and "fail-fast" subdomain enumeration wrapper designed for offensive security professionals and bug bounty hunters.
 
-    Waterfall Methodology: Passive → Resolution → Active → Permutation → Final Validation.
+Unlike simple wrappers that blindly pipe tools into each other, EnumerX uses a **Waterfall Logic** with intermediate validation steps. It aggregates passive data, validates it, and *only then* performs expensive active reconnaissance (permutations/bruteforce) on the **verified** dataset. This saves time, reduces CPU load, and eliminates "garbage-in-garbage-out" results.
 
-    Fail-Fast Architecture: Intermediate resolution step using puredns prevents generating permutations for non-existent domains.
+## 🔥 Key Features
 
-    Multi-Source Passive Recon: Integrates Subfinder, Assetfinder, Amass, GitHub, Shodan, VirusTotal, and more.
+* **Waterfall Methodology:** Passive → Resolution → Active → Permutation → Final Validation.
+* **Fail-Fast Architecture:** Intermediate resolution step using `puredns` prevents generating permutations for non-existent domains.
+* **Multi-Source Passive Recon:** Integrates Subfinder, Assetfinder, Amass, GitHub, Shodan, VirusTotal, and more.
+* **Smart Permutations:** Uses `alterx` and `dnsgen` seeded *only* by validated subdomains.
+* **Heavy Active Recon:** Includes BBOT, Cloud Recon (AWS/Azure), and Reverse DNS walking.
+* **Bulk Mode:** Multi-threaded processing for list-based scanning with progress tracking and consolidated reporting.
+* **Resumable:** Built-in checkpoint system to resume scans if interrupted.
+* **Resource Management:** Configurable timeouts and thread limits to prevent burning out your VPS.
 
-    Smart Permutations: Uses alterx and dnsgen seeded only by validated subdomains.
+## 🛠️ Logic Workflow
 
-    Heavy Active Recon: Includes BBOT, Cloud Recon (AWS/Azure), and Reverse DNS walking.
+1. **Passive Gathering:** Scrapes 15+ sources (APIs, archives, CT logs).
+2. **Intermediate Resolution:** Validating passive results immediately using `puredns`.
+3. **Active Recon:** Cloud extraction, Zone transfers, and Bruteforce (MassDNS/Shuffledns).
+4. **Smart Permutation:** Generates mutations based **only** on the validated passive list.
+5. **Final Validation:** Resolves all active findings and extracts IPs/CNAMEs.
 
-    Bulk Mode: Multi-threaded processing for list-based scanning with progress tracking and consolidated reporting.
+## 📦 Installation
 
-    Resumable: Built-in checkpoint system to resume scans if interrupted.
+EnumerX is a Bash wrapper that relies on the best tools in the industry. You must have the following installed and in your `$PATH`:
 
-    Resource Management: Configurable timeouts and thread limits to prevent burning out your VPS.
-
-🛠️ Logic Workflow
-
-    Passive Gathering: Scrapes 15+ sources (APIs, archives, CT logs).
-
-    Intermediate Resolution: validating passive results immediately using puredns.
-
-    Active Recon: Cloud extraction, Zone transfers, and Bruteforce (MassDNS/Shuffledns).
-
-    Smart Permutation: Generates mutations based only on the validated passive list.
-
-    Final Validation: Resolves all active findings and extracts IPs/CNAMEs.
-
-📦 Installation
-
-EnumerX is a Bash wrapper that relies on the best tools in the industry. You must have the following installed and in your $PATH:
-1. Essentials
-Bash
-
+### 1. Essentials
+```bash
 sudo apt update
 sudo apt install curl jq dig git libpcap-dev
-
-2. Go Tools (The Powerhouse)
+```
+### 2. Go Tools (The Powerhouse)
 
 Ensure you have Go installed, then run:
 Bash
 
-go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
-go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest
-go install -v github.com/tomnomnom/assetfinder@latest
-go install -v github.com/lc/gau/v2/cmd/gau@latest
-go install -v github.com/d3mondev/puredns/v2@latest
-go install -v github.com/projectdiscovery/alterx/cmd/alterx@latest
-go install -v github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest
+go install -v [github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest](https://github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest)
+go install -v [github.com/projectdiscovery/dnsx/cmd/dnsx@latest](https://github.com/projectdiscovery/dnsx/cmd/dnsx@latest)
+go install -v [github.com/tomnomnom/assetfinder@latest](https://github.com/tomnomnom/assetfinder@latest)
+go install -v [github.com/lc/gau/v2/cmd/gau@latest](https://github.com/lc/gau/v2/cmd/gau@latest)
+go install -v [github.com/d3mondev/puredns/v2@latest](https://github.com/d3mondev/puredns/v2@latest)
+go install -v [github.com/projectdiscovery/alterx/cmd/alterx@latest](https://github.com/projectdiscovery/alterx/cmd/alterx@latest)
+go install -v [github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest](https://github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest)
 
-3. Other Tools
+### 3. Other Tools
 
     MassDNS: Installation Guide
 
@@ -65,10 +59,10 @@ go install -v github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest
 
     DNSGen: pip install dnsgen
 
-4. Clone EnumerX
+### 4. Clone EnumerX
 Bash
 
-git clone https://github.com/MrRockettt/EnumerX.git
+git clone [https://github.com/MrRockettt/EnumerX.git](https://github.com/MrRockettt/EnumerX.git)
 cd EnumerX
 chmod +x enumerx.sh
 
@@ -111,14 +105,14 @@ Bash
 Example:
 Bash
 
-# Runs 5 domains at a time, using 50 threads per domain
+### Runs 5 domains at a time, using 50 threads per domain
 ./enumerx.sh sublist targets.txt 5 50
 
 📂 Output Structure
 
 The script creates a structured output directory:
 Plaintext
-
+```
 results/
 ├── passive/       # Raw files from individual tools (Subfinder, Amass, etc.)
 ├── active/        # Bruteforce, Cloud, and Permutation results
@@ -128,8 +122,8 @@ results/
 │   ├── target.com_ips.txt             # Unique IP addresses
 │   └── target.com_cnames.txt          # CNAME records
 └── SUMMARY_target.com.txt             # Scan statistics and metrics
-
-🤝 Contributing
+```
+### 🤝 Contributing
 
 Contributions, issues, and feature requests are welcome!
 
@@ -143,7 +137,7 @@ Contributions, issues, and feature requests are welcome!
 
     Open a Pull Request.
 
-⚠️ Disclaimer
+### ⚠️ Disclaimer
 
 This tool is created for educational purposes and authorized security assessments only. The author is not responsible for any misuse of this tool. Always ensure you have permission to scan the target infrastructure.
 📜 License
