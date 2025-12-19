@@ -60,12 +60,12 @@ go install -v github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest
     DNSGen: pip install dnsgen
 
 ### 4. Clone EnumerX
-Bash
+```
 
 git clone [https://github.com/0xSalm0n/EnumerX.git](https://github.com/0xSalm0n/EnumerX.git)
 cd EnumerX
 chmod +x enumerx.sh
-
+```
 ⚙️ Configuration
 
 Before running, open enumerx.sh and configure your API keys at the top of the file. This is critical for deep enumeration.
@@ -77,37 +77,38 @@ export GITHUB_TOKEN="your_key"
 # ... add other keys
 
 Ensure your paths to wordlists and resolvers are correct:
-Bash
+```
 
 export RESOLVERS_PATH="/path/to/resolvers.txt"
 export WORDLIST_PATH="/path/to/best-dns-wordlist.txt"
+```
 
-🚀 Usage
-Single Domain Mode
+### 🚀 Usage
+## Single Domain Mode
 
 Best for deep-diving into a single target.
-Bash
+```
 
 ./enumerx.sh subenum target.com [threads] [output_dir]
-
-Example:
-Bash
+```
+## Example:
+```
 
 ./enumerx.sh subenum tesla.com 100 tesla_scan
-
-Bulk Mode
+```
+## Bulk Mode
 
 Best for processing large lists of domains (e.g., Bug Bounty programs). It runs multiple domains in parallel.
-Bash
+```
 
 ./enumerx.sh sublist <domains.txt> [parallel_jobs] [threads_per_job]
-
-Example:
-Bash
+```
+## Example:
 
 ### Runs 5 domains at a time, using 50 threads per domain
+```
 ./enumerx.sh sublist targets.txt 5 50
-
+```
 📂 Output Structure
 
 The script creates a structured output directory:
@@ -145,5 +146,6 @@ This tool is created for educational purposes and authorized security assessment
 Distributed under the MIT License. See LICENSE for more information.
 
 Author: Salmon Kumar / 0xSalm0n
+
 
 
